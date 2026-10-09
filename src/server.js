@@ -3,6 +3,7 @@ import cors from "cors";
 import { env } from "./config/env.js";
 import { checkDatabase, closeDatabase } from "./config/database.js";
 import { authenticate, requireSameOrigin } from "./middleware/authenticate.js";
+import { securityHeaders } from "./middleware/security.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 import { asyncHandler, sendSuccess } from "./utils/http.js";
 import authRoutes from "./routes/auth.js";
@@ -11,6 +12,7 @@ import apiRoutes from "./routes/api.js";
 const app = express();
 
 app.disable("x-powered-by");
+app.use(securityHeaders);
 app.use(cors({
   origin(origin, callback) {
     if (!origin || env.allowedClientUrls.includes(origin)) return callback(null, true);

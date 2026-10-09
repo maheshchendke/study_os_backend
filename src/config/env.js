@@ -60,5 +60,6 @@ export const env = {
     apiKey: process.env.AI_API_KEY || "",
     model: process.env.AI_MODEL || "",
     baseUrl: (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
+    streamTimeoutMs: Math.max(5000, Number(process.env.AI_STREAM_TIMEOUT_MS) || 60000),
   },
 };

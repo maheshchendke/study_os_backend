@@ -55,7 +55,13 @@ export async function getAnalytics(userId, days = 7) {
 
 export async function getLeaderboard(userId, period = "all") {
   const days = period === "week" ? 7 : period === "month" ? 30 : null;
-  const timeFilter = days ? "AND (e.created_at IS NULL OR e.created_at >= DATE_SUB(CURRENT_DATE(), INTERVAL ? DAY))" : "";
+  // The time filter belongs inside the ON clause of the LEFT JOIN, not in WHERE.
+  // Placing it in WHERE would turn the outer join into an inner join and exclude
+  // students who have zero events in the selected period.
+  const joinTimeFilter = days
+    ? "AND e.created_at >= DATE_SUB(CURRENT_DATE(), INTERVAL ? DAY)"
+    : "";
+  const params = days ? [days] : [];
   const [rows] = await pool.execute(
     `SELECT u.id, u.name,
        COALESCE(SUM(CASE e.event_type
@@ -66,12 +72,19 @@ export async function getLeaderboard(userId, period = "all") {
          WHEN 'PLACEMENT_TOPIC_COMPLETED' THEN 6
          ELSE 0 END),0) AS xp
      FROM users u
-     LEFT JOIN analytics_events e ON e.user_id = u.id ${timeFilter}
-     WHERE u.role = 'student' AND u.id = ?
+     LEFT JOIN analytics_events e ON e.user_id = u.id ${joinTimeFilter}
+     WHERE u.role = 'student'
      GROUP BY u.id, u.name
      ORDER BY xp DESC, u.name ASC
-     LIMIT 100     `,
-     days ? [days, userId] : [userId]
+     LIMIT 100`,
+    params
   );
-  return rows.map((row, index) => ({ id: row.id, name: row.name, xp: Number(row.xp), rank: index + 1, isCurrentUser: row.id === userId }));
+  return rows.map((row, index) => ({
+    id: row.id,
+    name: row.name,
+    xp: Number(row.xp),
+    rank: index + 1,
+    isCurrentUser: row.id === userId,
+  }));
 }
+

@@ -34,8 +34,11 @@ const actionSchema = z.object({
 }).strict();
 
 export function parseAssistantResponse(raw) {
-  const match = raw.match(/(?:^|\n)```studyos-action\s*\n([\s\S]*?)\n```\s*$/i);
-  if (!match) return { message: raw.trim(), action: null };
+  const match = raw.match(/(?:^|\n)```studyos-action\s*\n([\s\S]*?)\n```/i);
+  if (!match) {
+    const cleaned = raw.replace(/(?:^|\n)```studyos-action[\s\S]*?(?:```|$)/gi, "").trim();
+    return { message: cleaned || raw.trim(), action: null };
+  }
   let parsed;
   try {
     parsed = JSON.parse(match[1]);
@@ -44,7 +47,9 @@ export function parseAssistantResponse(raw) {
   }
   const result = actionSchema.safeParse(parsed);
   if (!result.success) throw new ApiError(502, "The AI requested an invalid workspace action. Please try again.", "AI_INVALID_ACTION");
-  const visibleMessage = raw.slice(0, match.index).trim();
+  const before = raw.slice(0, match.index);
+  const after = raw.slice(match.index + match[0].length);
+  const visibleMessage = `${before}\n${after}`.trim();
   return { message: visibleMessage || "Done. I've applied that to your StudyOS workspace.", action: result.data };
 }
 
@@ -137,15 +142,6 @@ async function studyContext(userId) {
 
 async function providerResponse(message, context, history = [], continuation = false, signal) {
   if (!env.ai.apiKey || !env.ai.model) {
-    if (input.confirmationId && input.confirm === true) {
-      const [pending] = await pool.execute("SELECT * FROM ai_actions WHERE id=? AND user_id=? AND status='pending_confirmation' LIMIT 1", [input.confirmationId, userId]);
-      if (!pending.length) throw new ApiError(404, "Pending AI action not found.", "NOT_FOUND");
-      const action = JSON.parse(pending[0].structured_action);
-      const result = await executeAction(userId, action);
-      await pool.execute("UPDATE ai_actions SET status='completed', result=? WHERE id=? AND user_id=?", [JSON.stringify(result), input.confirmationId, userId]);
-      const response = { message: "The confirmed action has been completed.", action: action.type, result };
-      onEvent({ type: "token", text: response.message }); onEvent({ type: "done", response }); return response;
-    }
     throw new ApiError(503, "AI Mentor is not configured. Add AI_API_KEY and AI_MODEL to backend/.env.", "AI_NOT_CONFIGURED");
   }
   let response;
@@ -183,6 +179,28 @@ async function providerResponse(message, context, history = [], continuation = f
       timedOut ? "The AI service took too long to respond. Please try again." : "The AI service is temporarily unreachable. Please try again later.",
       timedOut ? "AI_TIMEOUT" : "AI_PROVIDER_UNAVAILABLE"
     );
+  }
+  if (!response.ok && (response.status === 503 || response.status === 429)) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      response = await fetch(`${env.ai.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.ai.apiKey}` },
+        body: JSON.stringify({
+          model: env.ai.model,
+          temperature: 0.2,
+          max_tokens: 4000,
+          messages: [
+            { role: "system", content: AI_SYSTEM_PROMPT },
+            ...history.slice(-20).map(({ role, content }) => ({ role: role === "assistant" ? "assistant" : "user", content: String(content).slice(0, 12000) })),
+            { role: "user", content: `User message: ${message}${continuation ? "\n\nContinue the previous answer from exactly where it stopped. Do not repeat completed material." : ""}\n\nStudyOS data (use only when relevant):\n${JSON.stringify(context)}` },
+          ],
+        }),
+        signal: signal || AbortSignal.timeout(30_000),
+      });
+    } catch {
+      // Ignore retry network failure and proceed to error classification
+    }
   }
   if (!response.ok) {
     let providerError = {};
@@ -247,7 +265,16 @@ async function executeAction(userId, action) {
     case "createNote": return createEntity("notes", userId, data);
     case "updateNote": return updateEntity("notes", userId, requiredText(String(data.id || ""), "note id", 64), data);
     case "deleteNote": return deleteEntity("notes", userId, requiredText(String(data.id || ""), "note id", 64));
-    case "createStudyPlan": return createEntity("study-plans", userId, data);
+    case "createStudyPlan": {
+      const planData = { ...data };
+      if (planData.duration && !planData.duration_minutes) {
+        const num = Number(String(planData.duration).replace(/[^\d.]/g, ""));
+        if (Number.isFinite(num) && num > 0) {
+          planData.duration_minutes = String(planData.duration).includes("h") ? Math.round(num * 60) : Math.round(num);
+        }
+      }
+      return createEntity("study-plans", userId, planData);
+    }
     case "startPomodoro": return startPomodoro(userId, data);
     case "completePomodoro": {
       const [rows] = await pool.execute("UPDATE pomodoro_sessions SET status='completed', completed_at=NOW() WHERE id=? AND user_id=? AND status='running'", [requiredText(String(data.id || ""), "session id", 64), userId]);
@@ -309,8 +336,13 @@ export async function chat(userId, body) {
     const confirmationId = await logAction(userId, message, action, "pending_confirmation");
     return { ...response, confirmationRequired: true, confirmationId, action: action.type };
   }
-  const result = await executeAction(userId, action);
-  await logAction(userId, message, action, "completed", result);
+  let result = null;
+  try {
+    result = await executeAction(userId, action);
+    await logAction(userId, message, action, "completed", result);
+  } catch (actionErr) {
+    await logAction(userId, message, action, "failed", { error: actionErr.message });
+  }
   if (result?.clarification) return { message: result.clarification, clarificationRequired: true };
   return { ...response, action: action.type, result };
 }
@@ -320,17 +352,25 @@ export async function streamChat(userId, body, onEvent, signal) {
   const message = requiredText(input.message, "message", 8000);
   const history = Array.isArray(input.history) ? input.history.filter((entry) => entry && ["user", "assistant"].includes(entry.role) && typeof entry.content === "string") : [];
   if (!env.ai.apiKey || !env.ai.model) {
-    const response = { message: fallbackAnswer(message), fallback: true, truncated: false };
-    onEvent({ type: "notice", message: "AI key is not configured; showing a local fallback." });
-    onEvent({ type: "token", text: response.message });
-    onEvent({ type: "done", response });
-    return response;
+    throw new ApiError(503, "AI Mentor is not configured. Add AI_API_KEY and AI_MODEL to backend/.env.", "AI_NOT_CONFIGURED");
   }
+
+  // Configurable stream timeout combined with caller's signal
+  const timeoutMs = env.ai.streamTimeoutMs || 60000;
+  const timeoutController = new AbortController();
+  const timeoutTimer = setTimeout(() => {
+    timeoutController.abort(new DOMException("The AI streaming request timed out.", "TimeoutError"));
+  }, timeoutMs);
+
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
+
   let providerResponseObject;
   try {
     const context = await studyContext(userId);
     const provider = await fetch(`${env.ai.baseUrl}/chat/completions`, {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.ai.apiKey}` }, signal,
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.ai.apiKey}` }, signal: combinedSignal,
       body: JSON.stringify({ model: env.ai.model, temperature: 0.2, max_tokens: 4000, stream: true, messages: [
         { role: "system", content: AI_SYSTEM_PROMPT },
         ...history.slice(-20).map(({ role, content }) => ({ role, content: String(content).slice(0, 12000) })),
@@ -347,27 +387,46 @@ export async function streamChat(userId, body, onEvent, signal) {
       const publicResponse = { message: parsed.message, truncated: payload.choices[0].finish_reason === "length" };
       if (parsed.action) {
         const action = validateAction(parsed.action);
-        if (action.type.startsWith("delete")) Object.assign(publicResponse, { confirmationRequired: true, confirmationId: await logAction(userId, message, action, "pending_confirmation"), action: action.type });
-        else { const result = await executeAction(userId, action); await logAction(userId, message, action, "completed", result); Object.assign(publicResponse, { action: action.type, result }); if (result?.clarification) publicResponse.message = result.clarification; }
+        if (action.type.startsWith("delete")) {
+          Object.assign(publicResponse, { confirmationRequired: true, confirmationId: await logAction(userId, message, action, "pending_confirmation"), action: action.type });
+        } else {
+          const result = await executeAction(userId, action);
+          await logAction(userId, message, action, "completed", result);
+          Object.assign(publicResponse, { action: action.type, result });
+          if (result?.clarification) publicResponse.message = result.clarification;
+        }
       } else await logAction(userId, message, null, "completed", publicResponse);
       onEvent({ type: "token", text: publicResponse.message }); onEvent({ type: "done", response: publicResponse }); return publicResponse;
     }
   } catch (error) {
-    if (signal?.aborted) throw error;
-    const answer = await providerResponse(message, await studyContext(userId), history, input.continue === true, signal);
+    clearTimeout(timeoutTimer);
+    if (combinedSignal?.aborted) {
+      const isTimeout = timeoutController.signal.aborted;
+      if (isTimeout) {
+        logProviderFailure({ category: "timeout", message: "AI stream timed out." });
+        throw new ApiError(504, "The AI stream took too long to respond. Please try again.", "AI_TIMEOUT");
+      }
+      throw error;
+    }
+    const answer = await providerResponse(message, await studyContext(userId), history, input.continue === true, combinedSignal);
     const publicResponse = { message: answer.message, truncated: Boolean(answer.truncated) };
     if (answer.action) {
       const action = validateAction(answer.action);
-      const result = action.type.startsWith("delete")
-        ? null
-        : await executeAction(userId, action);
-      const confirmationId = action.type.startsWith("delete") ? await logAction(userId, message, action, "pending_confirmation") : null;
-      if (!confirmationId) await logAction(userId, message, action, "completed", result);
-      Object.assign(publicResponse, confirmationId ? { confirmationRequired: true, confirmationId, action: action.type } : { action: action.type, result });
+      const isDelete = action.type.startsWith("delete");
+      if (isDelete) {
+        const confirmationId = await logAction(userId, message, action, "pending_confirmation");
+        Object.assign(publicResponse, { confirmationRequired: true, confirmationId, action: action.type });
+      } else {
+        const result = await executeAction(userId, action);
+        await logAction(userId, message, action, "completed", result);
+        Object.assign(publicResponse, { action: action.type, result });
+        if (result?.clarification) publicResponse.message = result.clarification;
+      }
     } else await logAction(userId, message, null, "completed", publicResponse);
     onEvent({ type: "token", text: publicResponse.message }); onEvent({ type: "done", response: publicResponse });
     return publicResponse;
   }
+
   const reader = providerResponseObject.body.getReader();
   const decoder = new TextDecoder();
   let buffer = ""; let raw = ""; let finishReason = null;
@@ -390,31 +449,54 @@ export async function streamChat(userId, body, onEvent, signal) {
       streamPending = streamPending.slice(safeLength);
     }
   };
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n"); buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
-      let event; try { event = JSON.parse(line.slice(6)); } catch { continue; }
-      const choice = event.choices?.[0];
-      if (choice?.delta?.content) { raw += choice.delta.content; publishSafeText(choice.delta.content); }
-      if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n"); buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+        let event; try { event = JSON.parse(line.slice(6)); } catch { continue; }
+        const choice = event.choices?.[0];
+        if (choice?.delta?.content) { raw += choice.delta.content; publishSafeText(choice.delta.content); }
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+      }
     }
+    if (buffer.startsWith("data: ") && buffer !== "data: [DONE]") {
+      try { const event = JSON.parse(buffer.slice(6)); const choice = event.choices?.[0]; if (choice?.delta?.content) { raw += choice.delta.content; publishSafeText(choice.delta.content); } if (choice?.finish_reason) finishReason = choice.finish_reason; } catch { /* Ignore a final incomplete provider event. */ }
+    }
+    publishSafeText("", true);
+  } catch (readError) {
+    if (combinedSignal?.aborted) {
+      const isTimeout = timeoutController.signal.aborted;
+      if (isTimeout) {
+        logProviderFailure({ category: "timeout", message: "AI stream reader timed out." });
+        throw new ApiError(504, "The AI stream took too long to complete. Please try again.", "AI_TIMEOUT");
+      }
+    }
+    throw readError;
+  } finally {
+    clearTimeout(timeoutTimer);
   }
-  if (buffer.startsWith("data: ") && buffer !== "data: [DONE]") {
-    try { const event = JSON.parse(buffer.slice(6)); const choice = event.choices?.[0]; if (choice?.delta?.content) { raw += choice.delta.content; publishSafeText(choice.delta.content); } if (choice?.finish_reason) finishReason = choice.finish_reason; } catch { /* Ignore a final incomplete provider event. */ }
-  }
-  publishSafeText("", true);
+
   const parsed = parseAssistantResponse(raw);
   const publicResponse = { message: parsed.message, truncated: finishReason === "length" || finishReason === "max_tokens" };
   if (parsed.action) {
     const action = validateAction(parsed.action);
     if (action.type.startsWith("delete")) {
-      Object.assign(publicResponse, { confirmationRequired: true, confirmationId: await logAction(userId, message, action, "pending_confirmation"), action: action.type });
+      // Destructive actions MUST require confirmation and never execute immediately
+      const confirmationId = await logAction(userId, message, action, "pending_confirmation");
+      Object.assign(publicResponse, { confirmationRequired: true, confirmationId, action: action.type });
     } else {
-      const result = await executeAction(userId, action); await logAction(userId, message, action, "completed", result);
+      let result = null;
+      try {
+        result = await executeAction(userId, action);
+        await logAction(userId, message, action, "completed", result);
+      } catch (actionErr) {
+        await logAction(userId, message, action, "failed", { error: actionErr.message });
+      }
       Object.assign(publicResponse, { action: action.type, result });
       if (result?.clarification) publicResponse.message = result.clarification;
     }
