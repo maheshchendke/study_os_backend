@@ -1,5 +1,23 @@
+
 import mysql from "mysql2/promise";
 import { env } from "./env.js";
+
+const ssl = env.isProduction
+  ? (() => {
+      const ca = process.env.DB_SSL_CA;
+
+      if (!ca) {
+        throw new Error(
+          "Missing required environment variable: DB_SSL_CA"
+        );
+      }
+
+      return {
+        ca: ca.replace(/\\n/g, "\n"),
+        rejectUnauthorized: true,
+      };
+    })()
+  : undefined;
 
 export const pool = mysql.createPool({
   host: env.database.host,
@@ -7,6 +25,7 @@ export const pool = mysql.createPool({
   database: env.database.name,
   user: env.database.user,
   password: env.database.password,
+  ...(ssl ? { ssl } : {}),
   waitForConnections: true,
   connectionLimit: 10,
   maxIdle: 5,
@@ -18,7 +37,10 @@ export const pool = mysql.createPool({
 
 pool.on("connection", (connection) => {
   connection.on("error", (error) => {
-    console.error("MySQL connection error:", error.code || "UNKNOWN");
+    console.error(
+      "MySQL connection error:",
+      error.code || "UNKNOWN"
+    );
   });
 });
 
