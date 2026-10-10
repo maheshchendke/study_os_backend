@@ -50,9 +50,11 @@ for local development) and allows the configured `CLIENT_URL` origin (default
 `CLIENT_URL`, `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. `CLIENT_URL`
 must be the exact HTTPS frontend origin in production.
 
-`COOKIE_SAME_SITE=lax` is suitable when frontend and API are same-site. Use
-`COOKIE_SAME_SITE=none` only when the frontend and API are on separate
-cross-site HTTPS hosts. State-changing API calls validate the request origin.
+`COOKIE_SAME_SITE=lax` is suitable when frontend and API are same-site. The
+production default is `none` because the deployed Vercel frontend and Render API
+are cross-site; production cookies are also Secure. Set `COOKIE_SAME_SITE=lax`
+only when using same-site domains. State-changing API calls validate the request
+origin.
 
 The frontend uses `VITE_API_URL` and defaults to `/api`. Vite proxies that path
 to `http://localhost:5000` during development; set `BACKEND_DEV_URL` to change

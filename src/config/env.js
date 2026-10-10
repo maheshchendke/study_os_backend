@@ -22,7 +22,9 @@ const clientUrl = required("CLIENT_URL", isProduction ? "" : "http://localhost:5
 const allowedClientUrls = isProduction
   ? [clientUrl]
   : [...new Set([clientUrl, "http://localhost:5173", "http://192.168.1.5:5173"])];
-const cookieSameSite = (process.env.COOKIE_SAME_SITE || "lax").toLowerCase();
+// Vercel and Render use separate sites, so production session cookies must
+// support cross-site credentialed fetches. Secure is enabled in production.
+const cookieSameSite = (process.env.COOKIE_SAME_SITE || (isProduction ? "none" : "lax")).toLowerCase();
 if (!["lax", "strict", "none"].includes(cookieSameSite)) {
   throw new Error("COOKIE_SAME_SITE must be lax, strict, or none.");
 }
