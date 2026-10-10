@@ -19,6 +19,10 @@ const ssl = env.isProduction
     })()
   : undefined;
 
+if (env.isProduction && !env.database.password) {
+  throw new Error("Missing required environment variable: DB_PASSWORD");
+}
+
 export const pool = mysql.createPool({
   host: env.database.host,
   port: env.database.port,

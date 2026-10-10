@@ -51,7 +51,14 @@ export const env = {
   cookieSameSite,
   database: {
     host: required("DB_HOST", isProduction ? "" : "localhost"),
-    port: Number(process.env.DB_PORT || 3306),
+    port: (() => {
+      const value = process.env.DB_PORT || "3306";
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        throw new Error("DB_PORT must be an integer between 1 and 65535.");
+      }
+      return parsed;
+    })(),
     name: required("DB_NAME", isProduction ? "" : "studyos"),
     user: required("DB_USER", isProduction ? "" : "root"),
     password: process.env.DB_PASSWORD || "",
