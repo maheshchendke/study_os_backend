@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { pool } from "../src/config/database.js";
 import { parseAssistantResponse, AI_SYSTEM_PROMPT } from "../src/services/ai.js";
 
+test.after(async () => pool.end());
+
 test("plain Markdown answer preserves multiline code and is not forced into JSON", () => {
   const answer = "Here is Java.\n\n```java\nclass Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hi\");\n    }\n}\n```";
   assert.deepEqual(parseAssistantResponse(answer), { message: answer, action: null });

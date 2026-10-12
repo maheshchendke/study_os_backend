@@ -207,7 +207,9 @@ test("register, login, restore, logout, and isolate two users", async () => {
   assert.deepEqual(listB.payload.data, []);
   const leaderboardB = await request("/leaderboard?period=all", { cookie: cookieB });
   assert.equal(leaderboardB.status, 200);
-  assert.deepEqual(leaderboardB.payload.data.map((row) => row.id), [userBId]);
+  const leaderboardIds = leaderboardB.payload.data.map((row) => row.id);
+  assert.ok(leaderboardIds.includes(userBId));
+  assert.ok(leaderboardIds.includes(userAId), "the public leaderboard includes other student accounts");
 
   const duplicateForeignId = await request("/notifications", {
     method: "POST",

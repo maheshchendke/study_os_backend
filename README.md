@@ -47,8 +47,12 @@ npm run dev
 Run production mode with `npm start`. The API listens on `PORT` (default 5000
 for local development) and allows the configured `CLIENT_URL` origin (default
 `http://localhost:5173`). Production startup requires explicit `PORT`,
-`CLIENT_URL`, `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. `CLIENT_URL`
-must be the exact HTTPS frontend origin in production.
+`CLIENT_URL`, `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and `DB_SSL_CA`.
+`DB_SSL_CA` must contain Aiven's CA certificate as PEM text; TLS certificate
+verification remains enabled. `CLIENT_URL` must be the exact HTTPS frontend
+origin in production. The live frontend currently resolves to
+`https://study-osproject.vercel.app`; set that exact origin in Render's
+`CLIENT_URL` after confirming it still matches the active Vercel deployment.
 
 `COOKIE_SAME_SITE=lax` is suitable when frontend and API are same-site. The
 production default is `none` because the deployed Vercel frontend and Render API
@@ -75,10 +79,13 @@ public HTTPS API base URL ending in `/api`. It must not contain credentials.
 ## Verification
 
 ```powershell
-Invoke-RestMethod http://localhost:5000/api/health
+Invoke-RestMethod http://localhost:5000/api/health/live
+Invoke-RestMethod http://localhost:5000/api/health/ready
 ```
 
-Health checks Express and the configured MySQL connection. Responses use
+The liveness endpoint checks that Express is running. Readiness (`/api/health`
+and `/api/health/ready`) checks the configured MySQL connection and returns
+HTTP 503 while it is unavailable. Responses use
 `{ success, data, message }`; errors return safe messages and codes. AI requests
 use only the authenticated user's study data and keep the provider key on the
 backend.

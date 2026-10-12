@@ -4,6 +4,8 @@ import { streamChat } from "../src/services/ai.js";
 import { env } from "../src/config/env.js";
 import { pool } from "../src/config/database.js";
 
+test.after(async () => pool.end());
+
 test("streamChat requires confirmation and blocks direct execution for delete actions", async () => {
   const originalFetch = globalThis.fetch;
   const originalExecute = pool.execute;
@@ -73,6 +75,7 @@ test("streamChat requires confirmation and blocks direct execution for delete ac
 
 test("streamChat cancels and aborts on stream timeout", async () => {
   const originalFetch = globalThis.fetch;
+  const originalExecute = pool.execute;
   const originalKey = env.ai.apiKey;
   const originalModel = env.ai.model;
   const originalTimeout = env.ai.streamTimeoutMs;
@@ -80,13 +83,18 @@ test("streamChat cancels and aborts on stream timeout", async () => {
   env.ai.apiKey = "test-key";
   env.ai.model = "test-model";
   env.ai.streamTimeoutMs = 50; // short 50ms timeout for test
+  pool.execute = async () => [[{ count: 0, total: 0, completed: 0, minutes: 0, xp: 0 }], []];
 
   globalThis.fetch = async (url, options) => {
-    // Hang until signal aborted
+    // Hang until signal aborts, including the case where the timeout fired first.
     return new Promise((resolve, reject) => {
+      if (options.signal?.aborted) {
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+        return;
+      }
       options.signal?.addEventListener("abort", () => {
         reject(new DOMException("The operation was aborted.", "AbortError"));
-      });
+      }, { once: true });
     });
   };
 
@@ -104,5 +112,6 @@ test("streamChat cancels and aborts on stream timeout", async () => {
     env.ai.apiKey = originalKey;
     env.ai.model = originalModel;
     env.ai.streamTimeoutMs = originalTimeout;
+    pool.execute = originalExecute;
   }
 });

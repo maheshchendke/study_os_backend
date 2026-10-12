@@ -7,9 +7,9 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "migrate:auth": "node scripts/migrate-auth.js",
-    "test": "node --test --test-force-exit test/validation.test.js test/ai-response.test.js test/security.test.js test/leaderboard.test.js test/stream-safety.test.js test/cookie-config.test.js",
-    "test:all": "node --test --test-force-exit test/validation.test.js test/ai-response.test.js test/auth.integration.test.js test/security.test.js test/leaderboard.test.js test/stream-safety.test.js test/cookie-config.test.js",
-    "lint": "node --check src/server.js src/config/env.js src/config/database.js src/middleware/authenticate.js src/middleware/errorHandler.js src/routes/auth.js src/routes/api.js src/routes/entityRoutes.js src/services/ai.js src/services/analytics.js src/services/auth.js src/services/dashboard.js src/services/entities.js src/services/events.js src/services/notifications.js src/services/placement.js src/services/pomodoros.js src/services/topics.js src/utils/http.js src/validators/validation.js src/controllers/entities.js src/controllers/health.js test/cookie-config.test.js"
+    "test": "node --test test/validation.test.js test/ai-response.test.js test/security.test.js test/leaderboard.test.js test/stream-safety.test.js test/cookie-config.test.js test/health.test.js",
+    "test:all": "node --test test/ai-response.test.js test/auth.integration.test.js test/cookie-config.test.js test/health.test.js test/leaderboard.test.js test/security.test.js test/stream-safety.test.js test/validation.test.js",
+    "lint": "node scripts/check-syntax.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

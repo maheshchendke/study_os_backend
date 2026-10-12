@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { entityConfig } from "../src/services/entities.js";
 import { ApiError, dateValue, objectBody, requiredText } from "../src/utils/http.js";
+import { closeDatabase } from "../src/config/database.js";
+
+test.after(async () => closeDatabase());
 
 test("task validation keeps supported API fields and defaults", () => {
   const task = entityConfig.tasks.validate({

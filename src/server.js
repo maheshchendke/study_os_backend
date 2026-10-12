@@ -30,14 +30,20 @@ app.use(cors({
 app.use(express.json({ limit: "2mb" }));
 app.locals.clientUrl = env.clientUrl;
 app.use("/api/auth", requireSameOrigin, authRoutes);
-app.get("/api/health", asyncHandler(async (req, res) => {
+app.get("/api/health/live", (req, res) => sendSuccess(res, { status: "alive" }, "StudyOS API process is running."));
+const readinessHandler = asyncHandler(async (req, res) => {
   const token = process.env.HEALTH_DIAGNOSTIC_TOKEN;
   const suppliedToken = req.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
 
   // The diagnostic is opt-in and requires a separate secret. Never expose
   // database metadata through the ordinary public health check.
   if (token && suppliedToken && timingSafeTokenEqual(suppliedToken, token)) {
-    const [databaseRows] = await pool.execute("SELECT DATABASE() AS databaseName");
+    const [identityRows] = await pool.execute(
+      `SELECT DATABASE() AS databaseName,
+        @@hostname AS serverHostname,
+        @@port AS serverPort,
+        @@version AS serverVersion`
+    );
     const [tableRows] = await pool.execute(
       `SELECT TABLE_NAME AS tableName
        FROM information_schema.tables
@@ -45,7 +51,12 @@ app.get("/api/health", asyncHandler(async (req, res) => {
     );
     const existingTables = new Set(tableRows.map((row) => row.tableName));
     return sendSuccess(res, {
-      database: databaseRows[0]?.databaseName ?? null,
+      database: identityRows[0]?.databaseName ?? null,
+      server: {
+        hostname: identityRows[0]?.serverHostname ?? null,
+        port: identityRows[0]?.serverPort ?? null,
+        version: identityRows[0]?.serverVersion ?? null,
+      },
       tables: {
         users: existingTables.has("users"),
         user_sessions: existingTables.has("user_sessions"),
@@ -53,9 +64,16 @@ app.get("/api/health", asyncHandler(async (req, res) => {
     }, "Database diagnostic.");
   }
 
-  await checkDatabase();
-  return sendSuccess(res, { database: "connected" }, "StudyOS API is running");
-}));
+  try {
+    await checkDatabase();
+    return sendSuccess(res, { database: "connected" }, "StudyOS API is ready.");
+  } catch (error) {
+    logDatabaseFailure("readiness", error);
+    return res.status(503).json({ success: false, message: "Database is temporarily unavailable.", code: "DATABASE_UNAVAILABLE", error: "DATABASE_UNAVAILABLE" });
+  }
+});
+app.get("/api/health", readinessHandler);
+app.get("/api/health/ready", readinessHandler);
 app.use("/api", requireSameOrigin, authenticate, apiRoutes);
 app.use(notFound);
 app.use(errorHandler);
@@ -63,11 +81,51 @@ app.use(errorHandler);
 let server;
 let shuttingDown = false;
 
+const RETRYABLE_DATABASE_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ETIMEDOUT", "ECONNRESET", "PROTOCOL_CONNECTION_LOST"]);
+
+function logDatabaseFailure(stage, error) {
+  const code = error?.code || "UNKNOWN";
+  const category = code === "ENOTFOUND" || code === "EAI_AGAIN"
+    ? "dns"
+    : ["ER_ACCESS_DENIED_ERROR", "ER_BAD_DB_ERROR"].includes(code)
+      ? "database_configuration_or_access"
+      : "connection";
+  console.error("StudyOS MySQL connection failed:", JSON.stringify({
+    stage,
+    category,
+    code,
+    host: env.database.host,
+    port: env.database.port,
+  }));
+}
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function connectWithBoundedRetries() {
+  const retryDelays = [1000, 3000];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await checkDatabase();
+      console.log("StudyOS MySQL connection is ready.");
+      return;
+    } catch (error) {
+      logDatabaseFailure(`startup_attempt_${attempt + 1}`, error);
+      const waitMs = retryDelays[attempt];
+      if (!RETRYABLE_DATABASE_CODES.has(error?.code) || waitMs === undefined) return;
+      await delay(waitMs);
+    }
+  }
+}
+
 async function start() {
-  await checkDatabase();
-  server = app.listen(env.port, "0.0.0.0", () => {
-    console.log(`StudyOS API listening on port ${env.port}`);
+  await new Promise((resolve, reject) => {
+    server = app.listen(env.port, "0.0.0.0", () => {
+      console.log(`StudyOS API listening on port ${env.port}`);
+      resolve();
+    });
+    server.once("error", reject);
   });
+  await connectWithBoundedRetries();
 }
 
 async function shutdown(signal) {
@@ -85,12 +143,7 @@ process.on("SIGTERM", () => shutdown("SIGTERM").then(() => process.exit(0)));
 
 if (process.env.NODE_ENV !== "test") {
   start().catch(async (error) => {
-    const databaseCodes = new Set(["ECONNREFUSED", "ER_ACCESS_DENIED_ERROR", "ER_BAD_DB_ERROR", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET"]);
-    if (databaseCodes.has(error.code)) {
-      console.error("StudyOS could not connect to MySQL. Check backend/.env values DB_PASSWORD, DB_HOST, and DB_NAME.", error.code);
-    } else {
-      console.error("StudyOS API startup failed:", error.code || error.name || "UNKNOWN");
-    }
+    console.error("StudyOS API failed to start:", error.code || error.name || "UNKNOWN");
     await closeDatabase().catch(() => {});
     process.exitCode = 1;
   });

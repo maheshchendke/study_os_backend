@@ -2,10 +2,11 @@ import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-dotenv.config({ path: path.join(backendRoot, ".env") });
-
 const isProduction = process.env.NODE_ENV === "production";
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+if (!isProduction) {
+  dotenv.config({ path: path.join(backendRoot, ".env") });
+}
 
 function required(name, fallback) {
   const value = process.env[name] || fallback;
@@ -45,6 +46,11 @@ if (isProduction) {
   }
 }
 
+const databaseHost = required("DB_HOST", isProduction ? "" : "localhost");
+if (databaseHost !== databaseHost.trim() || /[\s/:?#@'\"]/.test(databaseHost)) {
+  throw new Error("DB_HOST must be a hostname or IP address only; set the port separately in DB_PORT.");
+}
+
 export const env = {
   port,
   clientUrl,
@@ -52,7 +58,7 @@ export const env = {
   isProduction,
   cookieSameSite,
   database: {
-    host: required("DB_HOST", isProduction ? "" : "localhost"),
+    host: databaseHost,
     port: (() => {
       const value = process.env.DB_PORT || "3306";
       const parsed = Number(value);

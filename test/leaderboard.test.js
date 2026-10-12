@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { getLeaderboard } from "../src/services/analytics.js";
 import { pool } from "../src/config/database.js";
 
+test.after(async () => pool.end());
+
 test("getLeaderboard constructs multi-student query and assigns ranks and isCurrentUser flag", async () => {
   const originalExecute = pool.execute;
   let capturedSql = "";
